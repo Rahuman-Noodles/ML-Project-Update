@@ -1,0 +1,77 @@
+{
+  "smoke-test-user": {
+    "id": "smoke-test-user",
+    "name": "Smoke Test User",
+    "survey_completed": true,
+    "favorite_cuisines": [
+      "Thai",
+      "Mediterranean",
+      "Mexican"
+    ],
+    "preferred_boroughs": [
+      "Manhattan"
+    ],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 4,
+    "adventurousness": 4,
+    "favorite_vibes": [
+      "Casual"
+    ],
+    "likes": [],
+    "created_at": "2026-04-02T18:08:51.528289",
+    "updated_at": "2026-04-02T18:10:28.343456"
+  },
+  "crispin": {
+    "id": "crispin",
+    "name": "Crispin",
+    "survey_completed": true,
+    "favorite_cuisines": [
+      "Korean"
+    ],
+    "preferred_boroughs": [
+      "Manhattan"
+    ],
+    "budget": "$$$",
+    "min_grade": "A",
+    "spice_tolerance": 1,
+    "adventurousness": 4,
+    "favorite_vibes": [
+      "Trendy"
+    ],
+    "likes": [
+      {
+        "restaurant_id": "ChIJI8tWLXRZwokR6l3Wq5J4Avw",
+        "dba": "Oh K-Dog & Egg Toast",
+        "cuisine": "Korean",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 5,
+        "source": "semantic_search",
+        "liked_at": "2026-04-02T19:01:27.598251"
+      },
+      {
+        "restaurant_id": "ChIJ9xm0tbZZwokRAnwoHzR-n5w",
+        "dba": "Gen Korean Bbq House",
+        "cuisine": "Korean",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 7,
+        "source": "semantic_search",
+        "liked_at": "2026-04-02T19:01:25.055317"
+      },
+      {
+        "restaurant_id": "ChIJc8TRORNZwokRSXXN5BDJM2A",
+        "dba": "Sushi & Co",
+        "cuisine": "Japanese",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 11,
+        "source": "semantic_search",
+        "liked_at": "2026-04-02T19:01:13.576780"
+      }
+    ],
+    "created_at": "2026-04-02T18:58:36.302596",
+    "updated_at": "2026-04-02T19:01:27.598530"
+  }
+}
