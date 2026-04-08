@@ -10,14 +10,16 @@ from utils.search import build_description, get_embeddings
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 CACHE_DIR = DATA_DIR / "cache"
 DEFAULT_SEARCH_SAMPLE_SIZE = 750
+BASE_DATASET_LIMIT = 8000
+PREPARED_DATASET_VERSION = 2
 
 
 def _prepared_df_path(sample_size):
-    return CACHE_DIR / f"prepared_search_{sample_size}.pkl"
+    return CACHE_DIR / f"prepared_search_v{PREPARED_DATASET_VERSION}_{sample_size}.pkl"
 
 
 def _embedding_cache_key(sample_size, row_count):
-    return f"prepared_{sample_size}_{row_count}"
+    return f"prepared_v{PREPARED_DATASET_VERSION}_{sample_size}_{row_count}"
 
 
 def _ensure_cache_dir():
@@ -27,31 +29,65 @@ def _ensure_cache_dir():
 def load_prepared_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE, force_refresh=False):
     _ensure_cache_dir()
     prepared_df_path = _prepared_df_path(sample_size)
+    base_df = load_nyc_base_safe(limit=BASE_DATASET_LIMIT)
+
+    if base_df.empty:
+        return pd.DataFrame(), None, {"prepared": False, "sample_size": sample_size}
 
     if prepared_df_path.exists() and not force_refresh:
         try:
             prepared_df = pd.read_pickle(prepared_df_path)
             if not prepared_df.empty:
                 embeddings = get_embeddings(prepared_df, _embedding_cache_key(sample_size, len(prepared_df)))
-                return prepared_df, embeddings, {"prepared": True, "sample_size": sample_size, "rows": len(prepared_df)}
+                enriched_rows = prepared_df["g_place_id"].notna().sum() if "g_place_id" in prepared_df.columns else 0
+                return prepared_df, embeddings, {
+                    "prepared": True,
+                    "sample_size": sample_size,
+                    "rows": len(prepared_df),
+                    "base_rows": len(prepared_df),
+                    "enriched_rows": int(enriched_rows),
+                }
         except Exception:
             pass
 
     api_key = get_google_api_key()
-    base_df = load_nyc_base_safe(limit=8000)
-
-    if base_df.empty:
-        return pd.DataFrame(), None, {"prepared": False, "sample_size": sample_size}
-
     enriched_df = get_enriched_restaurants(base_df, sample_size, api_key, force_refresh=force_refresh)
-    if enriched_df.empty:
-        return pd.DataFrame(), None, {"prepared": False, "sample_size": sample_size}
+    prepared_df = base_df.copy()
 
-    prepared_df = enriched_df.copy()
+    if not enriched_df.empty:
+        enrichment_columns = [
+            "camis",
+            "g_rating",
+            "g_reviews",
+            "g_price",
+            "g_summary",
+            "g_photo_ref",
+            "g_maps_url",
+            "g_place_id",
+        ]
+        available_columns = [column for column in enrichment_columns if column in enriched_df.columns]
+        enriched_subset = (
+            enriched_df[available_columns]
+            .drop_duplicates(subset=["camis"], keep="first")
+        )
+        prepared_df = prepared_df.merge(enriched_subset, on="camis", how="left")
+
+    required_google_columns = ["g_rating", "g_reviews", "g_price", "g_place_id"]
+    available_required_columns = [column for column in required_google_columns if column in prepared_df.columns]
+    if available_required_columns:
+        prepared_df = prepared_df.dropna(subset=available_required_columns).reset_index(drop=True)
+
     prepared_df["description"] = prepared_df.apply(build_description, axis=1)
     prepared_df.to_pickle(prepared_df_path)
     embeddings = get_embeddings(prepared_df, _embedding_cache_key(sample_size, len(prepared_df)))
-    return prepared_df, embeddings, {"prepared": True, "sample_size": sample_size, "rows": len(prepared_df)}
+    enriched_rows = prepared_df["g_place_id"].notna().sum() if "g_place_id" in prepared_df.columns else 0
+    return prepared_df, embeddings, {
+        "prepared": True,
+        "sample_size": sample_size,
+        "rows": len(prepared_df),
+        "base_rows": len(prepared_df),
+        "enriched_rows": int(enriched_rows),
+    }
 
 
 def warm_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE):

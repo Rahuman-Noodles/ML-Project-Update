@@ -1,5 +1,7 @@
 import os
 import time
+import json
+import hashlib
 import joblib
 import numpy as np
 import pandas as pd
@@ -12,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
+CLUSTER_SCHEMA_VERSION = 2
 
 try:
     import umap
@@ -20,12 +23,114 @@ except ImportError:
     UMAP_AVAILABLE = False
 
 REQUIRED_COLUMNS = ["restaurant_id", "name", "lat", "lng", "cuisine_type", "price_tier", "avg_rating", "review_count"]
+CUISINE_FAMILY_KEYWORDS = {
+    "Asian": {"chinese", "japanese", "korean", "thai", "vietnamese", "indian", "sushi", "ramen", "dim sum"},
+    "European": {"italian", "french", "spanish", "greek", "mediterranean", "pizza", "pasta"},
+    "Latin American": {"mexican", "latin", "caribbean", "peruvian", "cuban", "dominican"},
+    "American": {"american", "burger", "chicken", "sandwich", "steak", "barbecue", "bbq"},
+    "Cafe & Bakery": {"cafe", "coffee", "bakery", "dessert", "donut", "juice"},
+    "Middle Eastern & African": {"middle eastern", "ethiopian", "halal", "shawarma", "falafel"},
+}
 
 
 def validate_dataframe(df: pd.DataFrame):
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"restaurants dataset is missing required columns: {missing}")
+
+
+def _cuisine_family(cuisine_name):
+    name = str(cuisine_name or "").lower()
+    for family, keywords in CUISINE_FAMILY_KEYWORDS.items():
+        if any(keyword in name for keyword in keywords):
+            return family
+    return "Other"
+
+
+def _cluster_label(cluster_cuisines: pd.Series):
+    clean_values = cluster_cuisines.fillna("").astype(str)
+    if clean_values.empty:
+        return "Mixed Cluster"
+
+    family_counts = clean_values.map(_cuisine_family).value_counts()
+    top_family = family_counts.index[0]
+    top_family_share = family_counts.iloc[0] / max(len(clean_values), 1)
+    top_cuisines = clean_values.value_counts().head(2).index.tolist()
+
+    if top_family != "Other" and top_family_share >= 0.6:
+        return f"{top_family} Favorites"
+    if len(top_cuisines) >= 2:
+        return f"{top_cuisines[0]} + {top_cuisines[1]}"
+    return f"{top_cuisines[0]} & Similar"
+
+
+def _price_descriptor(price_value):
+    if pd.isna(price_value):
+        return "Mixed Price"
+    if price_value <= 1.5:
+        return "Budget"
+    if price_value <= 2.5:
+        return "Mid-Range"
+    return "Upscale"
+
+
+def _cluster_label_candidates(cluster_df: pd.DataFrame):
+    cuisines = cluster_df["cuisine_type"].fillna("").astype(str)
+    top_cuisines = cuisines.value_counts().head(3).index.tolist()
+    borough_counts = cluster_df["boro"].fillna("").astype(str).value_counts()
+    top_borough = borough_counts.index[0] if not borough_counts.empty else ""
+    borough_share = borough_counts.iloc[0] / max(len(cluster_df), 1) if not borough_counts.empty else 0.0
+    price_desc = _price_descriptor(pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean())
+    family_counts = cuisines.map(_cuisine_family).value_counts()
+    top_family = family_counts.index[0] if not family_counts.empty else "Mixed"
+
+    candidates = []
+    if len(top_cuisines) >= 2:
+        candidates.append(f"{top_cuisines[0]} + {top_cuisines[1]}")
+    if top_cuisines:
+        candidates.append(f"{top_cuisines[0]} {price_desc}")
+    if top_cuisines and top_borough and borough_share >= 0.33:
+        candidates.append(f"{top_borough} {top_cuisines[0]}")
+    if top_family != "Other" and top_borough and borough_share >= 0.33:
+        candidates.append(f"{top_borough} {top_family}")
+    if top_family != "Other":
+        candidates.append(f"{top_family} {price_desc}")
+    if top_cuisines:
+        candidates.append(f"{top_cuisines[0]} & Similar")
+    candidates.append(f"Cluster {int(cluster_df['cluster_id'].iloc[0]) + 1}")
+    return candidates
+
+
+def _assign_cluster_labels(df: pd.DataFrame):
+    label_map = {}
+    used_labels = set()
+    cluster_summaries = []
+
+    for cluster_id, cluster_df in df.groupby("cluster_id"):
+        cluster_summaries.append(
+            (
+                cluster_id,
+                cluster_df["cuisine_type"].nunique(),
+                len(cluster_df),
+                cluster_df["cuisine_type"].value_counts().iloc[0] if not cluster_df.empty else 0,
+                cluster_df.copy(),
+            )
+        )
+
+    cluster_summaries.sort(key=lambda item: (item[1], item[3], item[2], -int(item[0])), reverse=True)
+
+    for cluster_id, _, _, _, cluster_df in cluster_summaries:
+        chosen_label = None
+        for candidate in _cluster_label_candidates(cluster_df):
+            if candidate not in used_labels:
+                chosen_label = candidate
+                break
+        if chosen_label is None:
+            chosen_label = f"Cluster {int(cluster_id) + 1}"
+        label_map[cluster_id] = chosen_label
+        used_labels.add(chosen_label)
+
+    return df["cluster_id"].map(label_map)
 
 
 def build_feature_matrix(df: pd.DataFrame):
@@ -37,7 +142,9 @@ def build_feature_matrix(df: pd.DataFrame):
     df["cuisine_type_grouped"] = df["cuisine_type"].apply(
         lambda x: x if cuisine_counts.get(x, 0) >= 0.01 else "other"
     )
+    df["cuisine_family"] = df["cuisine_type"].apply(_cuisine_family)
     cuisine_dummies = pd.get_dummies(df["cuisine_type_grouped"], prefix="cuisine")
+    cuisine_family_dummies = pd.get_dummies(df["cuisine_family"], prefix="family")
 
     # 2. Price tier normalized
     price_norm = ((df["price_tier"].fillna(2) - 1) / 3.0).values.reshape(-1, 1)
@@ -72,17 +179,19 @@ def build_feature_matrix(df: pd.DataFrame):
         tag_features = tag_matrix
 
     X = np.hstack([
-        cuisine_dummies.values,
-        price_norm,
-        rating_norm,
-        review_norm,
-        lat_norm,
-        lng_norm,
+        cuisine_dummies.values * 2.8,
+        cuisine_family_dummies.values * 1.6,
+        price_norm * 0.9,
+        rating_norm * 0.7,
+        review_norm * 0.45,
+        lat_norm * 0.2,
+        lng_norm * 0.2,
         tag_features,
     ]).astype(np.float32)
 
     feature_columns = (
         list(cuisine_dummies.columns) +
+        list(cuisine_family_dummies.columns) +
         ["price_tier_norm", "rating_norm", "review_norm", "lat_norm", "lng_norm"] +
         ([f"tag_{t}" for t in top_tags] if "tags" in df.columns else [])
     )
@@ -114,6 +223,22 @@ def apply_user_weights(X: np.ndarray, df: pd.DataFrame, user_history: dict):
 
     affinity = cosine_similarity(X, user_vec).flatten()
     return np.hstack([X, affinity.reshape(-1, 1)])
+
+
+def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int):
+    history_payload = {
+        "schema_version": CLUSTER_SCHEMA_VERSION,
+        "visited_ids": sorted(str(value) for value in user_history.get("visited_ids", [])),
+        "rated": {str(key): float(value) for key, value in sorted(user_history.get("rated", {}).items())},
+        "cuisine_preferences": sorted(str(value) for value in user_history.get("cuisine_preferences", [])),
+        "price_preference": int(user_history.get("price_preference", 2)),
+        "neighborhood_preference": sorted(str(value) for value in user_history.get("neighborhood_preference", [])),
+        "k": int(k),
+        "row_count": int(len(df)),
+        "restaurant_sample": sorted(df["restaurant_id"].astype(str).head(25).tolist()),
+    }
+    payload = json.dumps(history_payload, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
@@ -171,10 +296,8 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
     df["pca_y"] = X_pca[:, 1]
     df["pca_z"] = X_pca[:, 2]
 
-    # Auto-label clusters from dominant cuisine
-    df["cluster_label"] = df.groupby("cluster_id")["cuisine_type"].transform(
-        lambda x: x.value_counts().index[0] + " & Similar"
-    )
+    # Auto-label clusters with unique descriptive names
+    df["cluster_label"] = _assign_cluster_labels(df)
 
     # User affinity score (last column of X_aug)
     df["user_affinity_score"] = X_aug[:, -1]
@@ -202,18 +325,23 @@ def cache_is_fresh():
 def load_cache():
     df = pd.read_parquet(CACHE_PATH)
     artifacts = joblib.load(MODEL_PATH)
-    return df, artifacts["kmeans"], artifacts["scaler"], artifacts["pca"]
+    return df, artifacts["kmeans"], artifacts["scaler"], artifacts["pca"], artifacts.get("signature")
 
 
-def save_cache(df, kmeans, scaler, pca):
+def save_cache(df, kmeans, scaler, pca, signature):
     os.makedirs("data", exist_ok=True)
     df.to_parquet(CACHE_PATH, index=False)
-    joblib.dump({"kmeans": kmeans, "scaler": scaler, "pca": pca}, MODEL_PATH)
+    joblib.dump({"kmeans": kmeans, "scaler": scaler, "pca": pca, "signature": signature}, MODEL_PATH)
 
 
 def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 8, force: bool = False):
+    signature = _cluster_signature(df, user_history, k)
     if not force and cache_is_fresh():
-        return load_cache()
+        cached_df, cached_kmeans, cached_scaler, cached_pca, cached_signature = load_cache()
+        cached_labels = cached_df.groupby("cluster_id")["cluster_label"].first()
+        has_duplicate_labels = cached_labels.duplicated().any()
+        if cached_signature == signature and not has_duplicate_labels:
+            return cached_df, cached_kmeans, cached_scaler, cached_pca
     result_df, kmeans, scaler, pca = run_kmeans(df, user_history, k)
-    save_cache(result_df, kmeans, scaler, pca)
+    save_cache(result_df, kmeans, scaler, pca, signature)
     return result_df, kmeans, scaler, pca

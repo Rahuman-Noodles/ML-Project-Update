@@ -171,8 +171,8 @@ if prepared_df.empty or "description" not in prepared_df.columns:
     st.stop()
 
 status_col1, status_col2, status_col3 = st.columns(3)
-status_col1.metric("Prepared Restaurants", f"{cache_info.get('rows', len(prepared_df)):,}")
-status_col2.metric("Prepared Sample Size", cache_info.get("sample_size", DEFAULT_SEARCH_SAMPLE_SIZE))
+status_col1.metric("Restaurants Loaded", f"{cache_info.get('base_rows', len(prepared_df)):,}")
+status_col2.metric("Google-Enriched Rows", f"{cache_info.get('enriched_rows', 0):,}")
 status_col3.metric("Embeddings", "Ready" if embeddings is not None else "Lexical fallback")
 
 st.caption("Use the page navigation in the sidebar to jump into Recommendations, Semantic Search, PCA Explorer, or the 3D Manhattan Map.")

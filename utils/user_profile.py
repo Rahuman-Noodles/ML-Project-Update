@@ -29,6 +29,10 @@ def _now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _format_budget_slider_value(value):
+    return r"\$" * int(value)
+
+
 def _slugify(value):
     slug = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
     return slug or DEFAULT_PROFILE_ID
@@ -145,10 +149,65 @@ def get_default_user_history():
     }
 
 
-def profile_to_user_history(profile):
+def _normalize_name(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _resolve_like_restaurant_id(like_item, restaurant_df=None):
+    candidate_ids = [
+        like_item.get("restaurant_id"),
+        like_item.get("camis"),
+    ]
+    for candidate in candidate_ids:
+        if candidate is not None and str(candidate).strip():
+            candidate_text = str(candidate).strip()
+            if restaurant_df is None:
+                return candidate_text
+            if candidate_text in set(restaurant_df["restaurant_id"].astype(str)):
+                return candidate_text
+
+    if restaurant_df is None or restaurant_df.empty:
+        return None
+
+    normalized_name = _normalize_name(like_item.get("dba") or like_item.get("name"))
+    normalized_boro = str(like_item.get("boro", "")).strip().lower()
+    normalized_cuisine = str(like_item.get("cuisine", "")).strip().lower()
+
+    candidates = restaurant_df.copy()
+    candidates["_norm_name"] = candidates["name"].fillna("").map(_normalize_name)
+    candidates["_norm_boro"] = candidates["boro"].fillna("").astype(str).str.lower()
+    candidates["_norm_cuisine"] = candidates["cuisine_type"].fillna("").astype(str).str.lower()
+
+    if normalized_name:
+        candidates = candidates[candidates["_norm_name"] == normalized_name]
+    if normalized_boro and not candidates.empty:
+        boro_match = candidates[candidates["_norm_boro"] == normalized_boro]
+        if not boro_match.empty:
+            candidates = boro_match
+    if normalized_cuisine and not candidates.empty:
+        cuisine_match = candidates[candidates["_norm_cuisine"] == normalized_cuisine]
+        if not cuisine_match.empty:
+            candidates = cuisine_match
+
+    if candidates.empty:
+        return None
+    return str(candidates.iloc[0]["restaurant_id"])
+
+
+def profile_to_user_history(profile, restaurant_df=None):
     likes = profile.get("likes", [])
-    visited_ids = [str(item.get("restaurant_id")) for item in likes if item.get("restaurant_id")]
-    rated = {str(item.get("restaurant_id")): 5.0 for item in likes if item.get("restaurant_id")}
+    visited_ids = []
+    rated = {}
+    for item in likes:
+        restaurant_id = _resolve_like_restaurant_id(item, restaurant_df=restaurant_df)
+        if not restaurant_id:
+            continue
+        if restaurant_id not in visited_ids:
+            visited_ids.append(restaurant_id)
+        try:
+            rated[restaurant_id] = float(item.get("rating", 5.0))
+        except (TypeError, ValueError):
+            rated[restaurant_id] = 5.0
     return {
         "visited_ids": visited_ids,
         "rated": rated,
@@ -255,6 +314,22 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
     if visited.empty:
         return -1
 
+    rated = user_history.get("rated", {})
+    cluster_votes = (
+        visited.assign(
+            vote_weight=visited["restaurant_id"].astype(str).map(
+                lambda restaurant_id: float(rated.get(restaurant_id, 3.0)) / 5.0
+            )
+        )
+        .groupby("cluster_id")["vote_weight"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    if not cluster_votes.empty and len(cluster_votes) == 1:
+        return int(cluster_votes.index[0])
+    if not cluster_votes.empty and cluster_votes.iloc[0] >= cluster_votes.iloc[-1] * 1.25:
+        return int(cluster_votes.index[0])
+
     try:
         from utils.clustering import apply_user_weights, build_feature_matrix
 
@@ -343,7 +418,14 @@ def render_profile_sidebar():
         options=BOROUGH_OPTIONS,
         default=profile.get("preferred_boroughs", []),
     )
-    budget = st.select_slider("Budget", options=BUDGET_OPTIONS, value=profile.get("budget", "$$"))
+    budget_value = BUDGET_OPTIONS.index(profile.get("budget", "$$")) + 1 if profile.get("budget", "$$") in BUDGET_OPTIONS else 2
+    budget_value = st.select_slider(
+        "Budget",
+        options=range(1, len(BUDGET_OPTIONS) + 1),
+        value=budget_value,
+        format_func=_format_budget_slider_value,
+    )
+    budget = BUDGET_OPTIONS[budget_value - 1]
     min_grade = st.selectbox("Lowest acceptable health grade", ["A", "B", "C"], index=["A", "B", "C"].index(profile.get("min_grade", "B")))
     spice_tolerance = st.slider("Spice tolerance", 1, 5, int(profile.get("spice_tolerance", 3)))
     adventurousness = st.slider("Adventurousness", 1, 5, int(profile.get("adventurousness", 3)))
@@ -378,23 +460,32 @@ def add_liked_restaurant(profile_name, restaurant_row, source="app"):
     profile_id = profile["id"]
     likes = profile.get("likes", [])
 
+    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
     restaurant_id = str(
         restaurant_row.get("restaurant_id")
-        or restaurant_row.get("g_place_id")
         or restaurant_row.get("camis")
+        or restaurant_row.get("g_place_id")
         or restaurant_row.get("dba")
     )
+    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
 
-    if any(str(item.get("restaurant_id")) == restaurant_id for item in likes):
+    if any(
+        str(item.get("restaurant_id")) == restaurant_id
+        or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        for item in likes
+    ):
         return False
 
     like_record = {
         "restaurant_id": restaurant_id,
+        "camis": camis_text,
+        "g_place_id": str(restaurant_row.get("g_place_id", "")).strip(),
         "dba": restaurant_row.get("dba") or restaurant_row.get("name", "Unknown"),
         "cuisine": restaurant_row.get("cuisine") or restaurant_row.get("cuisine_type", ""),
         "boro": restaurant_row.get("boro") or restaurant_row.get("neighborhood", ""),
         "grade": restaurant_row.get("grade", "N/A"),
         "score": int(pd.to_numeric(restaurant_row.get("score", 0), errors="coerce") or 0),
+        "rating": 5.0,
         "source": source,
         "liked_at": _now_iso(),
     }

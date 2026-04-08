@@ -77,12 +77,11 @@ with st.sidebar:
     st.markdown("### Map Controls")
     layer_type   = st.radio("Layer type", ["3D Columns", "Scatter Dots"])
     height_metric = st.selectbox("Column height by", ["avg_rating", "review_count", "user_affinity_score", "price_tier"])
-    map_style_name = st.selectbox("Map style", ["Dark", "Light", "Satellite"])
+    map_style_name = st.selectbox("Map style", ["Dark", "Light"])
 
 MAP_STYLES = {
     "Dark":      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     "Light":     "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-    "Satellite": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
 }
 
 # ── Run clustering ────────────────────────────────────────────────────────────
@@ -107,12 +106,17 @@ if predicted_cluster != -1:
 map_df = cdf.dropna(subset=["lat", "lng"]).copy()
 map_df = map_df[map_df["lat"].between(40.4774, 40.9176) & map_df["lng"].between(-74.2591, -73.7004)]
 
-all_cluster_ids = sorted(map_df["cluster_id"].unique().tolist())
+cluster_name_map = (
+    map_df[["cluster_id", "cluster_label"]]
+    .drop_duplicates()
+    .sort_values(["cluster_label", "cluster_id"])
+)
+all_cluster_labels = cluster_name_map["cluster_label"].tolist()
 with cluster_filter_placeholder.container():
-    cluster_filter = st.multiselect("Show clusters", options=all_cluster_ids, default=all_cluster_ids)
+    cluster_filter = st.multiselect("Show clusters", options=all_cluster_labels, default=all_cluster_labels)
 
 if cluster_filter:
-    map_df = map_df[map_df["cluster_id"].isin(cluster_filter)]
+    map_df = map_df[map_df["cluster_label"].isin(cluster_filter)]
 
 # Cluster colors with dimming
 def get_color(cid):
@@ -178,6 +182,7 @@ deck = pdk.Deck(
     layers=[layer],
     initial_view_state=view_state,
     tooltip=tooltip,
+    map_provider="carto",
     map_style=MAP_STYLES[map_style_name],
 )
 st.pydeck_chart(deck)
