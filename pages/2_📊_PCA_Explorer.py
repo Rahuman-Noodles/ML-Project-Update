@@ -21,7 +21,7 @@ CLUSTER_HEX = [
 ]
 
 st.title("📊 PCA Embedding Explorer")
-st.markdown("Restaurants plotted in 3D feature space — dots close together are semantically similar.")
+st.markdown("Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation, while the PCA summary below explains the main latent dimensions.")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -67,7 +67,22 @@ if predicted_cluster != -1:
     st.success(f"🎯 Your predicted cluster: **{cl_label}**")
 
 # ── Dot sizing ────────────────────────────────────────────────────────────────
-plot_df = cdf.dropna(subset=["pca_x", "pca_y", "pca_z"]).copy()
+pca_model = st.session_state.get("pca_model")
+pca_axis_labels = getattr(pca_model, "axis_labels_", ["PC1", "PC2", "PC3"]) if pca_model is not None else ["PC1", "PC2", "PC3"]
+pca_component_summaries = getattr(pca_model, "component_summaries_", ["", "", ""]) if pca_model is not None else ["", "", ""]
+
+with st.sidebar:
+    projection_mode = st.selectbox(
+        "Layout",
+        ["Cleaner Cluster View", "Principal Components"],
+        index=0,
+    )
+
+projection_columns = ["cluster_view_x", "cluster_view_y", "cluster_view_z"] if projection_mode == "Cleaner Cluster View" else ["pca_x", "pca_y", "pca_z"]
+plot_df = cdf.dropna(subset=projection_columns).copy()
+plot_df["plot_x"] = plot_df[projection_columns[0]]
+plot_df["plot_y"] = plot_df[projection_columns[1]]
+plot_df["plot_z"] = plot_df[projection_columns[2]]
 
 if size_by == "Review count":
     raw_size = pd.to_numeric(plot_df["review_count"], errors="coerce").fillna(0)
@@ -93,7 +108,7 @@ if color_by == "Cluster":
         opacity = 1.0 if (not highlight_mode or is_user_cluster) else 0.1
 
         fig.add_trace(go.Scatter3d(
-            x=subset["pca_x"], y=subset["pca_y"], z=subset["pca_z"],
+            x=subset["plot_x"], y=subset["plot_y"], z=subset["plot_z"],
             mode="markers",
             name=label,
             marker=dict(
@@ -117,7 +132,7 @@ else:
     }.get(color_by, "cluster_id")
 
     fig.add_trace(go.Scatter3d(
-        x=plot_df["pca_x"], y=plot_df["pca_y"], z=plot_df["pca_z"],
+        x=plot_df["plot_x"], y=plot_df["plot_y"], z=plot_df["plot_z"],
         mode="markers",
         marker=dict(
             size=plot_df["dot_size"],
@@ -136,20 +151,23 @@ else:
 
 # User position marker
 if show_user and predicted_cluster != -1:
-    user_pos = plot_df[plot_df["cluster_id"] == predicted_cluster][["pca_x", "pca_y", "pca_z"]].mean()
+    user_pos = plot_df[plot_df["cluster_id"] == predicted_cluster][["plot_x", "plot_y", "plot_z"]].mean()
     fig.add_trace(go.Scatter3d(
-        x=[user_pos["pca_x"]], y=[user_pos["pca_y"]], z=[user_pos["pca_z"]],
+        x=[user_pos["plot_x"]], y=[user_pos["plot_y"]], z=[user_pos["plot_z"]],
         mode="markers+text",
         name="You",
         text=["📍 You"],
         textposition="top center",
-        marker=dict(size=14, color="white", symbol="diamond",
-                    line=dict(color="#6c8fff", width=3)),
+        marker=dict(size=14, color="white", symbol="diamond", line=dict(color="#6c8fff", width=3)),
     ))
 
-x_title = "PC1" if show_axes else ""
-y_title = "PC2" if show_axes else ""
-z_title = "PC3" if show_axes else ""
+if show_axes:
+    if projection_mode == "Principal Components":
+        x_title, y_title, z_title = ["PC1", "PC2", "PC3"]
+    else:
+        x_title, y_title, z_title = ["Cluster Axis 1", "Cluster Axis 2", "Cluster Axis 3"]
+else:
+    x_title = y_title = z_title = ""
 
 fig.update_layout(
     height=650,
@@ -164,10 +182,18 @@ fig.update_layout(
                    gridcolor="#2a2a38", color="#7a7a9a"),
         bgcolor="rgba(13,13,16,0.95)",
     ),
-    legend=dict(bgcolor="rgba(20,20,30,0.8)", bordercolor="#2a2a38",
-                font=dict(color="#e0e0f0")),
+    legend=dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.12,
+        xanchor="left",
+        x=0,
+        bgcolor="rgba(20,20,30,0.8)",
+        bordercolor="#2a2a38",
+        font=dict(color="#e0e0f0"),
+    ),
     font=dict(color="#e0e0f0"),
-    margin=dict(l=0, r=0, t=40, b=0),
+    margin=dict(l=0, r=0, t=40, b=60),
 )
 
 try:
@@ -185,13 +211,24 @@ try:
 except Exception:
     st.plotly_chart(fig, use_container_width=True)
 
+# ── PCA component interpretation ─────────────────────────────────────────────
+if pca_model is not None:
+    st.markdown("---")
+    st.subheader("What The Principal Components Mean")
+    component_cols = st.columns(3)
+    for idx, col in enumerate(component_cols):
+        with col:
+            st.metric(f"PC{idx + 1}", pca_axis_labels[idx] if idx < len(pca_axis_labels) else f"PC{idx + 1}")
+            if idx < len(pca_component_summaries) and pca_component_summaries[idx]:
+                st.caption(pca_component_summaries[idx])
+
 # ── Explained variance bar ────────────────────────────────────────────────────
 if st.session_state["pca_model"] is not None:
     st.markdown("---")
     st.subheader("Variance Explained by Each Principal Component")
     pca_model = st.session_state["pca_model"]
     var_df = pd.DataFrame({
-        "Component": ["PC1", "PC2", "PC3"],
+        "Component": [f"PC{idx + 1}" for idx in range(3)],
         "Variance Explained (%)": [round(v * 100, 2) for v in pca_model.explained_variance_ratio_],
     })
     bar_fig = px.bar(var_df, x="Component", y="Variance Explained (%)",
